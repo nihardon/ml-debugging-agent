@@ -1,0 +1,26 @@
+# LangGraph / LangChain
+langgraph>=0.2.0
+langchain-core>=0.2.0
+
+# Anthropic SDK
+anthropic>=0.28.0
+
+# Vector store + local embeddings
+chromadb>=0.5.0
+sentence-transformers>=3.0.0
+
+# FastAPI backend
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+python-dotenv>=1.0.0
+
+# Data processing
+pandas>=2.2.0
+pyyaml>=6.0.1
+
+# Pydantic (Pydantic v2)
+pydantic>=2.7.0
+
+# Required by models.py TypedDict import
+typing_extensions>=4.9.0
