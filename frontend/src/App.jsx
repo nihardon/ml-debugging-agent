@@ -107,8 +107,10 @@ function HistoryPanel({ history, onSelect, activeIdx }) {
                     : "border-transparent hover:bg-gray-800 text-gray-400 hover:text-gray-200"
                   }`}
               >
-                <span className={`font-semibold ${color} mr-2`}>{entry.status}</span>
-                <span className="truncate">{entry.root_cause}</span>
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className={`font-semibold shrink-0 ${color}`}>{entry.status}</span>
+                  <span className="truncate">{entry.root_cause}</span>
+                </div>
                 <span className="block text-gray-600 text-xs mt-0.5">
                   {new Date(entry.ts).toLocaleTimeString()}
                 </span>
