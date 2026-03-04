@@ -27,6 +27,7 @@ class ConfigFlags(BaseModel):
 
 class SymptomSet(BaseModel):
     loss_trajectory: list[tuple[int, float]] = Field(default_factory=list)
+    val_loss_trajectory: list[tuple[int, float]] = Field(default_factory=list)
     loss_events: list[LossEvent] = Field(default_factory=list)
     gpu_memory_usage: Optional[float] = None  # peak MB
     error_type: Optional[str] = None  # CUDA | OOM | ShapeMismatch | DeviceMismatch | Other

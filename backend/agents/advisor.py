@@ -1,12 +1,14 @@
 """Node 3 — Advisor ('The Doctor').
 
 Makes a single async call to Claude and parses the structured DiagnosticReport.
+Streaming variant exposed via stream_advice() for the /diagnose/stream endpoint.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+from collections.abc import AsyncIterator
 from typing import Optional
 
 import anthropic
@@ -80,6 +82,54 @@ def _extract_json(text: str) -> str:
     if fence:
         return fence.group(1).strip()
     return text
+
+
+async def stream_advice(
+    symptoms: SymptomSet,
+    docs: list[KBDocument],
+    api_key: Optional[str] = None,
+) -> AsyncIterator[str]:
+    """Async generator that yields SSE-formatted strings.
+
+    Emits ``{"type": "token", "content": "..."}`` events for each text chunk,
+    then a final ``{"type": "done", "report": {...}}`` event with the parsed
+    DiagnosticReport, or ``{"type": "error", "message": "..."}`` on failure.
+    """
+    client = anthropic.AsyncAnthropic(api_key=api_key or os.getenv("ANTHROPIC_API_KEY"))
+    user_message = _build_user_message(symptoms, docs)
+    full_text = ""
+
+    try:
+        async with client.messages.stream(
+            model=MODEL,
+            max_tokens=2048,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_message}],
+        ) as stream:
+            async for chunk in stream.text_stream:
+                full_text += chunk
+                yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
+    except Exception as exc:
+        yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+        return
+
+    # Parse the completed response and send the final done event
+    raw_json = _extract_json(full_text)
+    try:
+        report = DiagnosticReport.model_validate_json(raw_json)
+    except Exception:
+        parsed = json.loads(raw_json)
+        parsed["ranked_actions"] = [
+            RankedAction(**a) if isinstance(a, dict) else a
+            for a in parsed.get("ranked_actions", [])
+        ]
+        parsed["citations"] = [
+            Citation(**c) if isinstance(c, dict) else c
+            for c in parsed.get("citations", [])
+        ]
+        report = DiagnosticReport(**parsed)
+
+    yield f"data: {json.dumps({'type': 'done', 'report': report.model_dump()})}\n\n"
 
 
 async def advise_node(state: GraphState) -> GraphState:

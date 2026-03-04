@@ -2,12 +2,17 @@ import React, { useMemo } from "react";
 import Plot from "react-plotly.js";
 
 export default function LossChart({ lossData, divergenceStep }) {
-  const { xVals, yVals } = useMemo(() => {
-    if (!lossData || lossData.length === 0) return { xVals: [], yVals: [] };
-    return {
-      xVals: lossData.map((p) => p.step),
-      yVals: lossData.map((p) => p.loss),
-    };
+  const { xVals, yVals, valXVals, valYVals, hasValLoss } = useMemo(() => {
+    if (!lossData || lossData.length === 0)
+      return { xVals: [], yVals: [], valXVals: [], valYVals: [], hasValLoss: false };
+
+    const xVals    = lossData.map((p) => p.step);
+    const yVals    = lossData.map((p) => p.loss);
+    const valPts   = lossData.filter((p) => p.val_loss != null);
+    const hasValLoss = valPts.length > 0;
+    const valXVals = valPts.map((p) => p.step);
+    const valYVals = valPts.map((p) => p.val_loss);
+    return { xVals, yVals, valXVals, valYVals, hasValLoss };
   }, [lossData]);
 
   if (!lossData) {
@@ -36,10 +41,19 @@ export default function LossChart({ lossData, divergenceStep }) {
       y: yVals,
       type: "scatter",
       mode: "lines",
-      name: "Training Loss",
+      name: "Train Loss",
       line: { color: "#818cf8", width: 2 },
-      hovertemplate: "Step %{x}<br>Loss: %{y:.4f}<extra></extra>",
+      hovertemplate: "Step %{x}<br>Train: %{y:.4f}<extra></extra>",
     },
+    ...(hasValLoss ? [{
+      x: valXVals,
+      y: valYVals,
+      type: "scatter",
+      mode: "lines",
+      name: "Val Loss",
+      line: { color: "#f97316", width: 2, dash: "dot" },
+      hovertemplate: "Step %{x}<br>Val: %{y:.4f}<extra></extra>",
+    }] : []),
   ];
 
   const shapes = [];
@@ -101,10 +115,11 @@ export default function LossChart({ lossData, divergenceStep }) {
             linecolor: "#374151",
             zeroline: false,
           },
-          margin: { t: 10, r: 20, b: 50, l: 55 },
+          margin: { t: hasValLoss ? 30 : 10, r: 20, b: 50, l: 55 },
           shapes,
           annotations,
-          showlegend: false,
+          showlegend: hasValLoss,
+          legend: { orientation: "h", x: 0, y: 1.12, font: { size: 11, color: "#d1d5db" } },
           autosize: true,
         }}
         config={{ displayModeBar: false, responsive: true }}

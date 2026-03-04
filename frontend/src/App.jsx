@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import DiagnosticReport from "./components/DiagnosticReport";
 import LossChart from "./components/LossChart";
 import UploadPanel from "./components/UploadPanel";
@@ -30,9 +30,58 @@ function KBStatus() {
   );
 }
 
+function StreamingPanel({ text }) {
+  const bottomRef = useRef(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [text]);
+
+  return (
+    <div className="bg-gray-900 rounded-xl border border-indigo-700/50 h-full flex flex-col overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center gap-2.5 px-4 py-3 border-b border-gray-800">
+        <span className="relative flex h-2.5 w-2.5">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75" />
+          <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-indigo-500" />
+        </span>
+        <span className="text-sm font-medium text-indigo-300">Claude is thinking…</span>
+        <span className="ml-auto text-xs text-gray-600 tabular-nums">{text.length} chars</span>
+      </div>
+
+      {/* Streaming text */}
+      <pre
+        className="flex-1 overflow-y-auto p-4 text-xs text-gray-400 font-mono whitespace-pre-wrap
+                   leading-relaxed scrollbar-thin scrollbar-thumb-gray-700"
+      >
+        {text}
+        <span className="inline-block w-1.5 h-3.5 bg-indigo-400 ml-0.5 align-text-bottom animate-pulse" />
+      </pre>
+    </div>
+  );
+}
+
 export default function App() {
   const [report, setReport] = useState(null);
   const [lossData, setLossData] = useState(null);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [streamingText, setStreamingText] = useState("");
+
+  const handleStreamStart = () => {
+    setReport(null);
+    setStreamingText("");
+    setIsStreaming(true);
+  };
+
+  const handleToken = (chunk) => {
+    setStreamingText((prev) => prev + chunk);
+  };
+
+  const handleResult = (data) => {
+    setReport(data);
+    setIsStreaming(false);
+    setStreamingText("");
+  };
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
@@ -52,16 +101,23 @@ export default function App() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Left column: Upload + Chart */}
           <div className="space-y-6">
-            <UploadPanel onResult={setReport} onLossData={setLossData} />
+            <UploadPanel
+              onResult={handleResult}
+              onLossData={setLossData}
+              onToken={handleToken}
+              onStreamStart={handleStreamStart}
+            />
             <LossChart
               lossData={lossData}
               divergenceStep={report?.divergence_step ?? null}
             />
           </div>
 
-          {/* Right column: Report */}
-          <div>
-            {report ? (
+          {/* Right column: Streaming panel → Report → Empty state */}
+          <div className="min-h-64">
+            {isStreaming ? (
+              <StreamingPanel text={streamingText} />
+            ) : report ? (
               <DiagnosticReport report={report} />
             ) : (
               <div className="bg-gray-900 rounded-xl border border-gray-700 h-full min-h-64

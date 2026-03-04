@@ -64,7 +64,7 @@ function FileDropZone({ field, file, onChange }) {
   );
 }
 
-export default function UploadPanel({ onResult, onLossData }) {
+export default function UploadPanel({ onResult, onLossData, onToken, onStreamStart }) {
   const [files, setFiles] = useState({ csv_file: null, config_file: null, log_file: null });
   const [stackTrace, setStackTrace] = useState("");
   const [loading, setLoading] = useState(false);
@@ -87,16 +87,19 @@ export default function UploadPanel({ onResult, onLossData }) {
 
         const headers = lines[0].split(",").map(parseCell).map((h) => h.toLowerCase());
 
-        // Match by exact name first, then partial match (e.g. "train_loss" contains "loss")
+        // Match by exact name first, then partial match
         const STEP_NAMES = ["step", "epoch", "iter", "iteration", "steps", "epochs"];
-        const LOSS_NAMES = ["loss", "train_loss", "training_loss", "val_loss", "value"];
+        const LOSS_NAMES = ["loss", "train_loss", "training_loss", "value"];
+        const VAL_NAMES  = ["val_loss", "validation_loss", "valid_loss", "eval_loss", "test_loss"];
 
-        let stepIdx = headers.findIndex((h) => STEP_NAMES.includes(h));
-        let lossIdx = headers.findIndex((h) => LOSS_NAMES.includes(h));
+        let stepIdx    = headers.findIndex((h) => STEP_NAMES.includes(h));
+        let lossIdx    = headers.findIndex((h) => LOSS_NAMES.includes(h));
+        let valLossIdx = headers.findIndex((h) => VAL_NAMES.includes(h));
 
-        // Partial match fallback
-        if (stepIdx < 0) stepIdx = headers.findIndex((h) => STEP_NAMES.some((n) => h.includes(n)));
-        if (lossIdx < 0) lossIdx = headers.findIndex((h) => LOSS_NAMES.some((n) => h.includes(n)));
+        // Partial match fallbacks
+        if (stepIdx    < 0) stepIdx    = headers.findIndex((h) => STEP_NAMES.some((n) => h.includes(n)));
+        if (lossIdx    < 0) lossIdx    = headers.findIndex((h) => LOSS_NAMES.some((n) => h.includes(n)));
+        if (valLossIdx < 0) valLossIdx = headers.findIndex((h) => VAL_NAMES.some((n) => h.includes(n)));
 
         // Last resort: column 0 = step, column 1 = loss
         const si = stepIdx >= 0 ? stepIdx : 0;
@@ -104,7 +107,12 @@ export default function UploadPanel({ onResult, onLossData }) {
 
         const points = lines.slice(1).map((line) => {
           const cols = line.split(",").map(parseCell);
-          return { step: parseFloat(cols[si]), loss: parseFloat(cols[li]) };
+          const pt = { step: parseFloat(cols[si]), loss: parseFloat(cols[li]) };
+          if (valLossIdx >= 0) {
+            const vl = parseFloat(cols[valLossIdx]);
+            if (!isNaN(vl)) pt.val_loss = vl;
+          }
+          return pt;
         }).filter((p) => !isNaN(p.step) && !isNaN(p.loss));
 
         onLossData(points.length > 0 ? points : []);
@@ -134,14 +142,47 @@ export default function UploadPanel({ onResult, onLossData }) {
     if (stackTrace.trim()) formData.append("stack_trace", stackTrace.trim());
 
     setLoading(true);
+    onStreamStart?.();
+
     try {
-      const res = await fetch("/diagnose", { method: "POST", body: formData });
+      const res = await fetch("/diagnose/stream", { method: "POST", body: formData });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.detail || `Server error: ${res.status}`);
       }
-      const data = await res.json();
-      onResult(data);
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        // SSE events are separated by double newlines
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop(); // keep any incomplete trailing chunk
+
+        for (const part of parts) {
+          const line = part.trim();
+          if (!line.startsWith("data: ")) continue;
+          let payload;
+          try {
+            payload = JSON.parse(line.slice(6));
+          } catch {
+            continue;
+          }
+
+          if (payload.type === "token") {
+            onToken?.(payload.content);
+          } else if (payload.type === "done") {
+            onResult(payload.report);
+          } else if (payload.type === "error") {
+            throw new Error(payload.message);
+          }
+        }
+      }
     } catch (err) {
       setError(err.message);
     } finally {

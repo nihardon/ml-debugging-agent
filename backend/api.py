@@ -8,12 +8,14 @@ from typing import Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 # Load .env from project root regardless of where uvicorn is invoked
 load_dotenv(Path(__file__).parents[1] / ".env")
 
+from backend.agents.advisor import stream_advice
 from backend.agents.parser import parse_node
+from backend.agents.retriever import retrieve_node
 from backend.graph import graph
 from backend.kb.chroma_store import get_store
 from backend.models import DiagnosticReport, SymptomSet
@@ -130,3 +132,68 @@ async def diagnose(
         raise HTTPException(status_code=500, detail="Agent did not produce a diagnostic report.")
 
     return JSONResponse(content=report.model_dump())
+
+
+# ---------------------------------------------------------------------------
+# /diagnose/stream  — SSE streaming variant (no dry_run, no graph.ainvoke)
+# ---------------------------------------------------------------------------
+
+@app.post("/diagnose/stream")
+async def diagnose_stream(
+    log_file: Optional[UploadFile] = File(default=None, description=".txt training log"),
+    csv_file: Optional[UploadFile] = File(default=None, description=".csv loss curve"),
+    config_file: Optional[UploadFile] = File(default=None, description=".yaml or .json config"),
+    stack_trace: Optional[str] = Form(default=None, description="Pasted stack trace text"),
+) -> StreamingResponse:
+    if not any([log_file, csv_file, config_file, stack_trace]):
+        raise HTTPException(
+            status_code=422,
+            detail="Provide at least one of: log_file, csv_file, config_file, stack_trace.",
+        )
+
+    raw_log: Optional[str] = None
+    raw_csv: Optional[str] = None
+    raw_config: Optional[str] = None
+
+    if log_file is not None:
+        content = await log_file.read()
+        raw_log = content.decode("utf-8", errors="replace")
+
+    if csv_file is not None:
+        content = await csv_file.read()
+        raw_csv = content.decode("utf-8", errors="replace")
+
+    if config_file is not None:
+        content = await config_file.read()
+        raw_config = content.decode("utf-8", errors="replace")
+
+    initial_state = {
+        "raw_log": raw_log,
+        "raw_csv": raw_csv,
+        "raw_config": raw_config,
+        "stack_trace": stack_trace,
+        "symptom_set": None,
+        "retrieved_docs": None,
+        "diagnostic_report": None,
+    }
+
+    # Parse and retrieve are fast deterministic steps — run them before the stream starts
+    try:
+        parsed_state = parse_node(initial_state)
+        retrieved_state = retrieve_node(parsed_state)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Pre-LLM pipeline error: {exc}") from exc
+
+    symptoms: Optional[SymptomSet] = retrieved_state.get("symptom_set")
+    docs = retrieved_state.get("retrieved_docs") or []
+
+    if symptoms is None:
+        raise HTTPException(status_code=500, detail="Parser did not produce a SymptomSet.")
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+
+    return StreamingResponse(
+        stream_advice(symptoms, docs, api_key=api_key),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

@@ -73,8 +73,14 @@ def _first_match(patterns: list[re.Pattern], text: str) -> Optional[str]:
     return None
 
 
+_VAL_LOSS_ALIASES = {"val_loss", "validation_loss", "valid_loss", "val loss", "eval_loss", "test_loss"}
+
+
 def _parse_csv(raw_csv: str) -> pd.DataFrame:
-    """Try to parse CSV; accept various column naming conventions."""
+    """Try to parse CSV; accept various column naming conventions.
+
+    Returns a DataFrame with columns: step, loss, and optionally val_loss.
+    """
     df = pd.read_csv(io.StringIO(raw_csv))
 
     # normalise column names
@@ -86,17 +92,20 @@ def _parse_csv(raw_csv: str) -> pd.DataFrame:
 
     step_col = next((c for c in df.columns if c in step_aliases), None)
     loss_col = next((c for c in df.columns if c in loss_aliases), None)
+    val_col = next((c for c in df.columns if c in _VAL_LOSS_ALIASES), None)
 
     if step_col is None:
-        # assume first column is step
         step_col = df.columns[0]
     if loss_col is None:
-        # assume second column is loss
         loss_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
 
     out = pd.DataFrame({"step": df[step_col], "loss": df[loss_col]})
     out["step"] = pd.to_numeric(out["step"], errors="coerce")
     out["loss"] = pd.to_numeric(out["loss"], errors="coerce")
+
+    if val_col is not None:
+        out["val_loss"] = pd.to_numeric(df[val_col], errors="coerce")
+
     return out.dropna(subset=["step"]).reset_index(drop=True)
 
 
@@ -183,12 +192,68 @@ def _detect_events(df: pd.DataFrame) -> tuple[list[LossEvent], Optional[int]]:
     return events, divergence_step
 
 
+def _detect_overfitting(
+    train_series: pd.Series,
+    val_series: pd.Series,
+    steps: pd.Series,
+) -> Optional[LossEvent]:
+    """Detect overfitting: val loss increases after its minimum while train loss keeps falling.
+
+    Requires at least 6 rows and val loss at least 5% worse than its best point,
+    with train loss still decreasing after that point.
+    """
+    if len(val_series) < 6:
+        return None
+
+    # Drop rows where either series is NaN or Inf for this analysis
+    mask = val_series.notna() & train_series.notna()
+    mask &= val_series.apply(lambda x: not math.isinf(x) if isinstance(x, float) else True)
+    mask &= train_series.apply(lambda x: not math.isinf(x) if isinstance(x, float) else True)
+
+    val_clean = val_series[mask]
+    train_clean = train_series[mask]
+    steps_clean = steps[mask]
+
+    if len(val_clean) < 6:
+        return None
+
+    best_idx = val_clean.idxmin()
+    best_val = float(val_clean[best_idx])
+    best_step = int(steps_clean[best_idx])
+
+    # Need at least 3 points after the best epoch to confirm the trend
+    after_best_val = val_clean.loc[best_idx:]
+    after_best_train = train_clean.loc[best_idx:]
+    if len(after_best_val) < 3:
+        return None
+
+    final_val = float(val_clean.iloc[-1])
+    final_train = float(train_clean.iloc[-1])
+    train_at_best = float(train_clean[best_idx])
+
+    # val loss at least 5% worse than best AND train still decreasing
+    if final_val > best_val * 1.05 and final_train < train_at_best:
+        return LossEvent(
+            event_type="overfitting",
+            step=best_step,
+            value=best_val,
+            description=(
+                f"Validation loss rising after step {best_step} "
+                f"(best val={best_val:.4f}, final val={final_val:.4f}) "
+                f"while training loss continues to decrease"
+            ),
+        )
+
+    return None
+
+
 def _convergence_speed(df: pd.DataFrame) -> Optional[str]:
     """Classify convergence as fast/slow/normal from first 5 epoch-worth of data."""
     if df.empty or len(df) < 2:
         return None
 
-    clean = df.dropna(subset=["loss"])
+    # Drop NaN and inf — inf values from divergent runs corrupt the slope calculation
+    clean = df[df["loss"].notna() & df["loss"].apply(math.isfinite)]
     # Use first 20% of data or first 5 rows, whichever is larger
     n = max(5, len(clean) // 5)
     subset = clean.head(n)
@@ -332,6 +397,8 @@ def parse_node(state: GraphState) -> GraphState:
     divergence_step: Optional[int] = None
     convergence_speed: Optional[str] = None
 
+    val_loss_trajectory: list[tuple[int, float]] = []
+
     if raw_csv:
         try:
             df = _parse_csv(raw_csv)
@@ -342,6 +409,17 @@ def parse_node(state: GraphState) -> GraphState:
             ]
             loss_events, divergence_step = _detect_events(df)
             convergence_speed = _convergence_speed(df)
+
+            # Val loss trajectory + overfitting detection
+            if "val_loss" in df.columns:
+                val_loss_trajectory = [
+                    (int(row.step), float(row.val_loss))
+                    for row in df.itertuples()
+                    if not (isinstance(row.val_loss, float) and math.isnan(row.val_loss))
+                ]
+                overfit_event = _detect_overfitting(df["loss"], df["val_loss"], df["step"])
+                if overfit_event is not None:
+                    loss_events.append(overfit_event)
         except Exception as e:
             loss_events.append(
                 LossEvent(event_type="other", description=f"CSV parse error: {e}")
@@ -378,6 +456,7 @@ def parse_node(state: GraphState) -> GraphState:
 
     symptom_set = SymptomSet(
         loss_trajectory=loss_trajectory,
+        val_loss_trajectory=val_loss_trajectory,
         loss_events=loss_events,
         gpu_memory_usage=gpu_memory_usage,
         error_type=error_type,
