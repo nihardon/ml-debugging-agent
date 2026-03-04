@@ -6,15 +6,17 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 # Load .env from project root regardless of where uvicorn is invoked
 load_dotenv(Path(__file__).parents[1] / ".env")
 
+from backend.agents.parser import parse_node
 from backend.graph import graph
 from backend.kb.chroma_store import get_store
-from backend.models import DiagnosticReport
+from backend.models import DiagnosticReport, SymptomSet
 
 app = FastAPI(title="ML Debugging Agent", version="1.0.0")
 
@@ -55,13 +57,17 @@ async def health():
 # /diagnose
 # ---------------------------------------------------------------------------
 
-@app.post("/diagnose", response_model=DiagnosticReport)
+@app.post("/diagnose")
 async def diagnose(
     log_file: Optional[UploadFile] = File(default=None, description=".txt training log"),
     csv_file: Optional[UploadFile] = File(default=None, description=".csv loss curve"),
     config_file: Optional[UploadFile] = File(default=None, description=".yaml or .json config"),
     stack_trace: Optional[str] = Form(default=None, description="Pasted stack trace text"),
-):
+    dry_run: bool = Query(
+        default=False,
+        description="If true, run only the Parser node and return the raw SymptomSet (no LLM call).",
+    ),
+) -> JSONResponse:
     # Reject if absolutely nothing was provided
     if not any([log_file, csv_file, config_file, stack_trace]):
         raise HTTPException(
@@ -86,7 +92,6 @@ async def diagnose(
         content = await config_file.read()
         raw_config = content.decode("utf-8", errors="replace")
 
-    # Build initial LangGraph state
     initial_state = {
         "raw_log": raw_log,
         "raw_csv": raw_csv,
@@ -97,6 +102,24 @@ async def diagnose(
         "diagnostic_report": None,
     }
 
+    # ------------------------------------------------------------------
+    # dry_run: Parser only — zero LLM cost, returns SymptomSet as JSON
+    # ------------------------------------------------------------------
+    if dry_run:
+        try:
+            parsed_state = parse_node(initial_state)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Parser error: {exc}") from exc
+
+        symptom_set: Optional[SymptomSet] = parsed_state.get("symptom_set")
+        if symptom_set is None:
+            raise HTTPException(status_code=500, detail="Parser did not produce a SymptomSet.")
+
+        return JSONResponse(content=symptom_set.model_dump())
+
+    # ------------------------------------------------------------------
+    # Full pipeline: Parse → Retrieve → Advise
+    # ------------------------------------------------------------------
     try:
         final_state = await graph.ainvoke(initial_state)
     except Exception as exc:
@@ -106,4 +129,4 @@ async def diagnose(
     if report is None:
         raise HTTPException(status_code=500, detail="Agent did not produce a diagnostic report.")
 
-    return report
+    return JSONResponse(content=report.model_dump())
