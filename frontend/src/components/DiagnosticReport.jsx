@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import Plot from "react-plotly.js";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -79,6 +79,41 @@ function Section({ title, icon, children }) {
 }
 
 // ---------------------------------------------------------------------------
+// Copyable code block
+// ---------------------------------------------------------------------------
+function CopyableCode({ code }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(code).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  return (
+    <div className="relative rounded-lg overflow-hidden border border-gray-700 text-sm group">
+      <button
+        onClick={handleCopy}
+        className="absolute top-2 right-2 z-10 px-2.5 py-1 rounded text-xs font-medium
+                   bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white
+                   opacity-0 group-hover:opacity-100 transition-all duration-150"
+      >
+        {copied ? "✓ Copied" : "Copy"}
+      </button>
+      <SyntaxHighlighter
+        language="python"
+        style={vscDarkPlus}
+        customStyle={{ margin: 0, borderRadius: 0, background: "#0d1117" }}
+        showLineNumbers
+      >
+        {code}
+      </SyntaxHighlighter>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 export default function DiagnosticReport({ report }) {
@@ -96,6 +131,16 @@ export default function DiagnosticReport({ report }) {
     divergence_step,
   } = report;
 
+  const handleDownload = () => {
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `diagnosis-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="bg-gray-900 rounded-xl border border-gray-700 overflow-hidden">
       {/* Header */}
@@ -105,7 +150,17 @@ export default function DiagnosticReport({ report }) {
           <h2 className="text-lg font-semibold text-white">Diagnostic Report</h2>
           <StatusBadge status={status} />
         </div>
-        <ConfidenceGauge value={confidence} />
+        <div className="flex items-center gap-3">
+          <ConfidenceGauge value={confidence} />
+          <button
+            onClick={handleDownload}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-600
+                       text-gray-400 hover:text-white hover:border-gray-400 transition-colors"
+            title="Download report as JSON"
+          >
+            ↓ JSON
+          </button>
+        </div>
       </div>
 
       <div className="px-6 py-5 space-y-6">
@@ -123,16 +178,7 @@ export default function DiagnosticReport({ report }) {
         {/* Fix code snippet */}
         {fix_code_snippet && (
           <Section title="Recommended Fix" icon="🔧">
-            <div className="rounded-lg overflow-hidden border border-gray-700 text-sm">
-              <SyntaxHighlighter
-                language="python"
-                style={vscDarkPlus}
-                customStyle={{ margin: 0, borderRadius: 0, background: "#0d1117" }}
-                showLineNumbers
-              >
-                {fix_code_snippet}
-              </SyntaxHighlighter>
-            </div>
+            <CopyableCode code={fix_code_snippet} />
           </Section>
         )}
 

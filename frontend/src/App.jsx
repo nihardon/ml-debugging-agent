@@ -3,6 +3,25 @@ import DiagnosticReport from "./components/DiagnosticReport";
 import LossChart from "./components/LossChart";
 import UploadPanel from "./components/UploadPanel";
 
+const HISTORY_KEY = "ml_agent_history";
+const MAX_HISTORY = 5;
+
+function loadHistory() {
+  try {
+    return JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(entries) {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(entries.slice(0, MAX_HISTORY)));
+  } catch {
+    // storage quota — silently skip
+  }
+}
+
 function KBStatus() {
   const [status, setStatus] = useState(null);
 
@@ -61,16 +80,60 @@ function StreamingPanel({ text }) {
   );
 }
 
+const STATUS_COLORS = {
+  Critical: "text-red-400 border-red-700",
+  Warning:  "text-yellow-400 border-yellow-700",
+  Healthy:  "text-green-400 border-green-700",
+};
+
+function HistoryPanel({ history, onSelect, activeIdx }) {
+  if (history.length === 0) return null;
+  return (
+    <div className="bg-gray-900 rounded-xl border border-gray-700 p-4">
+      <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-3">
+        Recent Diagnoses
+      </h3>
+      <ul className="space-y-1.5">
+        {history.map((entry, i) => {
+          const color = STATUS_COLORS[entry.status] || STATUS_COLORS.Warning;
+          const isActive = i === activeIdx;
+          return (
+            <li key={i}>
+              <button
+                onClick={() => onSelect(i)}
+                className={`w-full text-left px-3 py-2 rounded-lg text-xs border transition-colors
+                  ${isActive
+                    ? "bg-gray-800 border-indigo-700 text-white"
+                    : "border-transparent hover:bg-gray-800 text-gray-400 hover:text-gray-200"
+                  }`}
+              >
+                <span className={`font-semibold ${color} mr-2`}>{entry.status}</span>
+                <span className="truncate">{entry.root_cause}</span>
+                <span className="block text-gray-600 text-xs mt-0.5">
+                  {new Date(entry.ts).toLocaleTimeString()}
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 export default function App() {
   const [report, setReport] = useState(null);
   const [lossData, setLossData] = useState(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState("");
+  const [history, setHistory] = useState(loadHistory);
+  const [activeHistoryIdx, setActiveHistoryIdx] = useState(null);
 
   const handleStreamStart = () => {
     setReport(null);
     setStreamingText("");
     setIsStreaming(true);
+    setActiveHistoryIdx(null);
   };
 
   const handleToken = (chunk) => {
@@ -81,6 +144,22 @@ export default function App() {
     setReport(data);
     setIsStreaming(false);
     setStreamingText("");
+
+    const entry = { ...data, ts: Date.now() };
+    setHistory((prev) => {
+      const updated = [entry, ...prev].slice(0, MAX_HISTORY);
+      saveHistory(updated);
+      return updated;
+    });
+    setActiveHistoryIdx(0);
+  };
+
+  const handleSelectHistory = (idx) => {
+    const entry = history[idx];
+    if (!entry) return;
+    const { ts, ...reportData } = entry;
+    setReport(reportData);
+    setActiveHistoryIdx(idx);
   };
 
   return (
@@ -110,6 +189,11 @@ export default function App() {
             <LossChart
               lossData={lossData}
               divergenceStep={report?.divergence_step ?? null}
+            />
+            <HistoryPanel
+              history={history}
+              onSelect={handleSelectHistory}
+              activeIdx={activeHistoryIdx}
             />
           </div>
 

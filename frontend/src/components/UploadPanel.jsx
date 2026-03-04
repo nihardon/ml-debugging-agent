@@ -69,6 +69,7 @@ export default function UploadPanel({ onResult, onLossData, onToken, onStreamSta
   const [stackTrace, setStackTrace] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [dryRun, setDryRun] = useState(false);
 
   const handleFileChange = (field, file) => {
     setFiles((prev) => ({ ...prev, [field]: file }));
@@ -142,44 +143,55 @@ export default function UploadPanel({ onResult, onLossData, onToken, onStreamSta
     if (stackTrace.trim()) formData.append("stack_trace", stackTrace.trim());
 
     setLoading(true);
-    onStreamStart?.();
 
     try {
-      const res = await fetch("/diagnose/stream", { method: "POST", body: formData });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || `Server error: ${res.status}`);
-      }
+      if (dryRun) {
+        // Parser-only: no LLM call, returns SymptomSet as JSON
+        const res = await fetch("/diagnose?dry_run=true", { method: "POST", body: formData });
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.detail || `Server error: ${res.status}`);
+        }
+        const data = await res.json();
+        onResult(data);
+      } else {
+        // Full pipeline: SSE stream
+        onStreamStart?.();
+        const res = await fetch("/diagnose/stream", { method: "POST", body: formData });
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.detail || `Server error: ${res.status}`);
+        }
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        buffer += decoder.decode(value, { stream: true });
-        // SSE events are separated by double newlines
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop(); // keep any incomplete trailing chunk
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop();
 
-        for (const part of parts) {
-          const line = part.trim();
-          if (!line.startsWith("data: ")) continue;
-          let payload;
-          try {
-            payload = JSON.parse(line.slice(6));
-          } catch {
-            continue;
-          }
+          for (const part of parts) {
+            const line = part.trim();
+            if (!line.startsWith("data: ")) continue;
+            let payload;
+            try {
+              payload = JSON.parse(line.slice(6));
+            } catch {
+              continue;
+            }
 
-          if (payload.type === "token") {
-            onToken?.(payload.content);
-          } else if (payload.type === "done") {
-            onResult(payload.report);
-          } else if (payload.type === "error") {
-            throw new Error(payload.message);
+            if (payload.type === "token") {
+              onToken?.(payload.content);
+            } else if (payload.type === "done") {
+              onResult(payload.report);
+            } else if (payload.type === "error") {
+              throw new Error(payload.message);
+            }
           }
         }
       }
@@ -223,6 +235,19 @@ export default function UploadPanel({ onResult, onLossData, onToken, onStreamSta
             onChange={(e) => setStackTrace(e.target.value)}
           />
         </div>
+
+        {/* Dry-run toggle */}
+        <label className="flex items-center gap-2 cursor-pointer select-none w-fit">
+          <input
+            type="checkbox"
+            checked={dryRun}
+            onChange={(e) => setDryRun(e.target.checked)}
+            className="w-3.5 h-3.5 accent-indigo-500"
+          />
+          <span className="text-xs text-gray-500">
+            Parser only <span className="text-gray-600">(no LLM call)</span>
+          </span>
+        </label>
 
         {error && (
           <div className="rounded-lg bg-red-900/40 border border-red-700 px-4 py-2 text-sm text-red-300">
